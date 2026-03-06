@@ -1,12 +1,13 @@
 # LangChain Skills Agent
 
-使用 LangChain 1.0 构建的 Skills Agent，演示 Anthropic Skills 三层加载机制的底层原理。
+使用 LangChain 1.0 构建的 Skills Agent，演示 Skills 三层加载机制的底层原理。默认使用 Anthropic，也支持 OpenAI / OpenAI-compatible 接口。
 
 > **B站视频**: [Skills到底怎么实现？我写了个Agent跑给你看](https://www.bilibili.com/video/BV1ZpzhBLE82)
 
 ## 特性
 
-- **Extended Thinking**: 显示模型的思考过程（蓝色面板）
+- **多 Provider 支持**: 默认 Anthropic，支持 OpenAI / OpenAI-compatible Base URL
+- **Extended Thinking**: Anthropic 模型可显示思考过程（蓝色面板）
 - **流式输出**: Token 级实时显示响应
 - **工具调用可视化**: 显示工具名称、参数、执行结果
 - **三层 Skills 加载**: Level 1 元数据注入 → Level 2 指令加载 → Level 3 脚本执行
@@ -21,15 +22,57 @@ cd skills-agent-proto
 uv sync
 ```
 
-### 2. 配置 Claude API Key
+### 2. 配置模型 API
+
+默认文档仍以 Anthropic 为例；如果你使用接口AI 这类 OpenAI-compatible 代理，也可以切到 OpenAI 协议。
+
+#### Anthropic（默认）
 
 创建 `.env` 文件：
 
 > 使用第三方代理中转, 我推荐使用 [接口AI](https://jiekou.ai/referral?invited_code=3CF8T0)，注册绑定github得3刀试用券
 
 ```bash
+MODEL_PROVIDER=anthropic
+MODEL_NAME=claude-sonnet-4-5-20250929
+MODEL_API_KEY=sk-xxx
+MODEL_BASE_URL=https://api.jiekou.ai/anthropic
+```
+
+兼容旧配置，下面这些变量仍然可用：
+
+```bash
 ANTHROPIC_AUTH_TOKEN=sk-xxx
 ANTHROPIC_BASE_URL=https://api.jiekou.ai/anthropic
+CLAUDE_MODEL=claude-sonnet-4-5-20250929
+```
+
+#### OpenAI / OpenAI-compatible
+
+如果你要切到 OpenAI 协议，把 provider、model 和 base URL 切过去即可。接口AI 示例：
+
+```bash
+MODEL_PROVIDER=openai
+MODEL_NAME=gpt-5.4
+MODEL_API_KEY=sk-xxx
+MODEL_BASE_URL=https://api.jiekou.ai/openai
+```
+
+开启 OpenAI thinking 时，项目默认会走 Responses API，并自动把上面的 base URL 规范成 `https://api.jiekou.ai/openai/v1`，这样 `gpt-5.4` 的 reasoning 和 tool calling 可以同时工作。
+
+也支持 OpenAI 专属变量：
+
+```bash
+OPENAI_API_KEY=sk-xxx
+OPENAI_BASE_URL=https://api.jiekou.ai/openai
+OPENAI_MODEL=gpt-5.4
+OPENAI_REASONING_EFFORT=medium
+```
+
+如果你的代理只支持 `chat/completions`，可以显式关闭：
+
+```bash
+OPENAI_USE_RESPONSES_API=false
 ```
 
 ### 3. 交互式验证
@@ -37,6 +80,8 @@ ANTHROPIC_BASE_URL=https://api.jiekou.ai/anthropic
 ```bash
 uv run langchain-skills --interactive
 ```
+
+启动后会显示当前实际使用的 `provider:model`，方便确认是否已经切到 OpenAI。
 
 ## 三层加载演示
 
@@ -88,7 +133,7 @@ uv run langchain-skills --interactive
 # 单次执行
 uv run langchain-skills "列出当前目录"
 
-# 禁用 Thinking（降低延迟）
+# 禁用 Thinking（降低延迟；OpenAI 默认走标准流式输出）
 uv run langchain-skills --no-thinking "执行 pwd"
 
 # 查看发现的 Skills
@@ -152,7 +197,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 skills-agent-proto/
 ├── src/langchain_skills/
-│   ├── agent.py          # LangChain Agent (Extended Thinking)
+│   ├── agent.py          # LangChain Agent (Anthropic/OpenAI provider routing)
 │   ├── cli.py            # CLI 入口 (流式输出)
 │   ├── tools.py          # 工具定义 (load_skill, bash, read_file, write_file, glob, grep, edit, list_dir)
 │   ├── skill_loader.py   # Skills 发现和加载
@@ -192,15 +237,29 @@ uv run python -m pytest tests/ -v
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `ANTHROPIC_AUTH_TOKEN` | API Key | 必填 |
-| `ANTHROPIC_BASE_URL` | 代理地址 | 官方 API |
-| `CLAUDE_MODEL` | 模型名称 | claude-opus-4-5-20251101 |
-| `MAX_TURNS` | 最大交互次数 | 20 |
+| `MODEL_PROVIDER` | 通用 provider，`anthropic` / `openai` | `anthropic` |
+| `MODEL_NAME` | 通用模型名 | `claude-opus-4-5-20251101` |
+| `MODEL_API_KEY` | 通用 API Key / 平台 Token | 无 |
+| `MODEL_BASE_URL` | 通用 Base URL | 官方 API |
+| `ANTHROPIC_AUTH_TOKEN` | Anthropic 兼容旧配置 | 无 |
+| `ANTHROPIC_BASE_URL` | Anthropic Base URL | 官方 API |
+| `CLAUDE_MODEL` | Anthropic 兼容旧模型变量 | `claude-opus-4-5-20251101` |
+| `OPENAI_API_KEY` | OpenAI API Key | 无 |
+| `OPENAI_BASE_URL` | OpenAI / 兼容接口 Base URL | 官方 API |
+| `OPENAI_MODEL` | OpenAI 模型名 | `gpt-5-mini` |
+| `OPENAI_REASONING_EFFORT` | OpenAI thinking 强度 | `medium` |
+| `OPENAI_USE_RESPONSES_API` | 是否使用 Responses API | `true` |
+| `MAX_TOKENS` | 最大输出 tokens | `16000` |
+| `MODEL_TEMPERATURE` | 模型温度 | `1.0` |
+
+> 建议优先使用 `MODEL_*` 通用变量；这样在 Anthropic 和 OpenAI 之间切换时只需要改 provider、model、base_url。
 
 ## 参考文档
 
 - [docs/skill_introduce.md](./docs/skill_introduce.md) - Skills 详细介绍
 - [docs/langchain_agent_skill.md](./docs/langchain_agent_skill.md) - LangChain 实现说明
+- [LangChain ChatOpenAI](https://docs.langchain.com/oss/python/integrations/chat/openai) - OpenAI 集成
+- [LangChain Models / base_url](https://docs.langchain.com/oss/python/langchain/models) - OpenAI-compatible Base URL 配置
 
 ## License
 

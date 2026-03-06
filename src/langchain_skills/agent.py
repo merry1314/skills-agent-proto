@@ -16,6 +16,7 @@ LangChain Skills Agent 主体
 """
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Iterator
 
@@ -35,31 +36,198 @@ load_dotenv(override=True)
 
 
 # 默认配置
-DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_PROVIDER = "anthropic"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_MAX_TOKENS = 16000
 DEFAULT_TEMPERATURE = 1.0  # Extended Thinking 要求温度为 1.0
 DEFAULT_THINKING_BUDGET = 10000
+DEFAULT_OPENAI_REASONING_EFFORT = "medium"
 
 
-def get_anthropic_credentials() -> tuple[str | None, str | None]:
+@dataclass(frozen=True)
+class ModelConfig:
+    """模型初始化配置"""
+
+    provider: str
+    model: str
+    api_key: str | None
+    base_url: str | None
+    supports_extended_thinking: bool
+
+
+def _normalize_provider(provider: str | None) -> str | None:
+    """标准化 provider 名称"""
+    if provider is None:
+        return None
+
+    normalized = provider.strip().lower()
+    aliases = {
+        "anthropic": "anthropic",
+        "claude": "anthropic",
+        "openai": "openai",
+        "gpt": "openai",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    """解析布尔环境变量"""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_openai_base_url(base_url: str | None, use_responses_api: bool) -> str | None:
+    """为 OpenAI Responses API 规范化 base_url"""
+    if not base_url or not use_responses_api:
+        return base_url
+
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/v1"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+def _split_provider_prefixed_model(model: str | None) -> tuple[str | None, str | None]:
+    """解析 provider:model 形式的模型字符串"""
+    if not model or ":" not in model:
+        return None, model
+
+    raw_provider, raw_model = model.split(":", 1)
+    provider = _normalize_provider(raw_provider)
+    if provider in ("anthropic", "openai") and raw_model:
+        return provider, raw_model
+    return None, model
+
+
+def _infer_provider_from_model_name(model: str | None) -> str | None:
+    """根据模型名推断 provider"""
+    if not model:
+        return None
+
+    model_name = model.strip().lower()
+    anthropic_prefixes = ("claude-",)
+    openai_prefixes = ("gpt-", "o1", "o3", "o4", "chatgpt-")
+
+    if model_name.startswith(anthropic_prefixes):
+        return "anthropic"
+    if model_name.startswith(openai_prefixes):
+        return "openai"
+    return None
+
+
+def _resolve_requested_provider(model: str | None = None, model_provider: str | None = None) -> str:
+    """解析当前请求应使用的 provider"""
+    explicit_provider = _normalize_provider(model_provider or os.getenv("MODEL_PROVIDER"))
+    prefixed_provider, stripped_model = _split_provider_prefixed_model(model)
+    generic_env_provider, generic_env_model = _split_provider_prefixed_model(os.getenv("MODEL_NAME"))
+
+    env_provider_hint = (
+        generic_env_provider
+        or _infer_provider_from_model_name(generic_env_model)
+        or ("openai" if os.getenv("OPENAI_MODEL") else None)
+        or ("anthropic" if os.getenv("ANTHROPIC_MODEL") or os.getenv("CLAUDE_MODEL") else None)
+    )
+
+    provider = (
+        explicit_provider
+        or prefixed_provider
+        or _infer_provider_from_model_name(stripped_model)
+        or env_provider_hint
+        or DEFAULT_PROVIDER
+    )
+
+    if provider not in ("anthropic", "openai"):
+        raise ValueError(f"Unsupported model provider: {provider}")
+
+    return provider
+
+
+def _resolve_model_name(provider: str, requested_model: str | None = None) -> str:
+    """解析模型名称，兼容旧环境变量"""
+    requested_provider, stripped_model = _split_provider_prefixed_model(requested_model)
+    if requested_provider and requested_provider != provider:
+        raise ValueError(
+            f"Model provider mismatch: requested '{requested_provider}' but configured '{provider}'"
+        )
+    if stripped_model:
+        return stripped_model
+
+    generic_model = os.getenv("MODEL_NAME")
+    generic_provider, stripped_generic_model = _split_provider_prefixed_model(generic_model)
+    if generic_provider and generic_provider != provider:
+        stripped_generic_model = None
+    if stripped_generic_model:
+        return stripped_generic_model
+
+    if provider == "openai":
+        return os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+
+    return (
+        os.getenv("ANTHROPIC_MODEL")
+        or os.getenv("CLAUDE_MODEL")
+        or DEFAULT_ANTHROPIC_MODEL
+    )
+
+
+def _get_provider_credentials(provider: str) -> tuple[str | None, str | None]:
     """
-    获取 Anthropic API 认证信息
+    获取 provider 对应的 API 认证信息
 
     支持多种认证方式：
-    1. ANTHROPIC_API_KEY - 标准 API Key
-    2. ANTHROPIC_AUTH_TOKEN - 第三方代理认证 Token
+    1. 通用配置：MODEL_API_KEY / MODEL_BASE_URL
+    2. Provider 专属配置
+    3. OpenAI 兼容代理场景下，允许复用 ANTHROPIC_AUTH_TOKEN
+       作为 OpenAI 端点的共享平台 Token
 
     Returns:
         (api_key, base_url) 元组
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")
-    base_url = os.getenv("ANTHROPIC_BASE_URL")
+    api_key = os.getenv("MODEL_API_KEY")
+    base_url = os.getenv("MODEL_BASE_URL")
+
+    if provider == "openai":
+        api_key = (
+            api_key
+            or os.getenv("OPENAI_API_KEY")
+            or os.getenv("OPENAI_AUTH_TOKEN")
+            or os.getenv("ANTHROPIC_AUTH_TOKEN")
+            or os.getenv("ANTHROPIC_API_KEY")
+        )
+        base_url = base_url or os.getenv("OPENAI_BASE_URL")
+    else:
+        api_key = (
+            api_key
+            or os.getenv("ANTHROPIC_API_KEY")
+            or os.getenv("ANTHROPIC_AUTH_TOKEN")
+        )
+        base_url = base_url or os.getenv("ANTHROPIC_BASE_URL")
+
     return api_key, base_url
 
 
-def check_api_credentials() -> bool:
-    """检查是否配置了 API 认证"""
-    api_key, _ = get_anthropic_credentials()
+def resolve_model_config(model: str | None = None, model_provider: str | None = None) -> ModelConfig:
+    """解析当前模型配置"""
+    provider = _resolve_requested_provider(model=model, model_provider=model_provider)
+    model_name = _resolve_model_name(provider, model)
+    api_key, base_url = _get_provider_credentials(provider)
+
+    return ModelConfig(
+        provider=provider,
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+        supports_extended_thinking=(provider in {"anthropic", "openai"}),
+    )
+
+
+def check_api_credentials(model: str | None = None, model_provider: str | None = None) -> bool:
+    """检查是否配置了当前 provider 的 API 认证"""
+    api_key, _ = _get_provider_credentials(
+        _resolve_requested_provider(model=model, model_provider=model_provider)
+    )
     return api_key is not None
 
 
@@ -85,6 +253,7 @@ class LangChainSkillsAgent:
     def __init__(
         self,
         model: Optional[str] = None,
+        model_provider: Optional[str] = None,
         skill_paths: Optional[list[Path]] = None,
         working_directory: Optional[Path] = None,
         max_tokens: Optional[int] = None,
@@ -97,6 +266,7 @@ class LangChainSkillsAgent:
 
         Args:
             model: 模型名称，默认 claude-sonnet-4-5-20250929
+            model_provider: 模型提供商，支持 anthropic / openai
             skill_paths: Skills 搜索路径
             working_directory: 工作目录
             max_tokens: 最大 tokens
@@ -104,17 +274,24 @@ class LangChainSkillsAgent:
             enable_thinking: 是否启用 Extended Thinking
             thinking_budget: thinking 的 token 预算
         """
-        # thinking 配置
-        self.enable_thinking = enable_thinking
+        self.model_config = resolve_model_config(model=model, model_provider=model_provider)
+        self.model_provider = self.model_config.provider
+        self.model_name = self.model_config.model
+
+        # thinking 配置（当前仅 Anthropic 扩展思考链路完整支持）
+        self.enable_thinking = enable_thinking and self.model_config.supports_extended_thinking
         self.thinking_budget = thinking_budget
 
-        # 配置 (启用 thinking 时温度必须为 1.0)
-        self.model_name = model or os.getenv("CLAUDE_MODEL", DEFAULT_MODEL)
+        # 配置 (Anthropic 启用 thinking 时温度必须为 1.0)
         self.max_tokens = max_tokens or int(os.getenv("MAX_TOKENS", str(DEFAULT_MAX_TOKENS)))
-        if enable_thinking:
+        if self.enable_thinking:
             self.temperature = 1.0  # Anthropic 要求启用 thinking 时温度为 1.0
         else:
-            self.temperature = temperature or float(os.getenv("MODEL_TEMPERATURE", str(DEFAULT_TEMPERATURE)))
+            self.temperature = (
+                temperature
+                if temperature is not None
+                else float(os.getenv("MODEL_TEMPERATURE", str(DEFAULT_TEMPERATURE)))
+            )
         self.working_directory = working_directory or Path.cwd()
 
         # 初始化 SkillLoader
@@ -163,34 +340,53 @@ When a user request matches a skill's description, use the load_skill tool to ge
         - checkpointer: 会话记忆
 
         Extended Thinking 支持:
-        - 启用后可获取模型的思考过程
-        - 温度必须为 1.0
+        - Anthropic: 使用 thinking budget 获取思考过程
+        - OpenAI-compatible: 默认走 chat/completions + reasoning_effort，
+          避免部分代理不支持 Responses API
 
         认证支持:
-        - 支持 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN
-        - 支持 ANTHROPIC_BASE_URL 第三方代理
+        - 默认支持 Anthropic
+        - 支持 OpenAI / OpenAI-compatible base_url
+        - 支持 MODEL_* 通用变量和 provider 专属变量
         """
-        # 获取认证信息
-        api_key, base_url = get_anthropic_credentials()
-
         # 构建初始化参数
         init_kwargs = {
+            "model_provider": self.model_provider,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
 
-        # 添加认证参数（支持第三方代理）
-        if api_key:
-            init_kwargs["api_key"] = api_key
-        if base_url:
-            init_kwargs["base_url"] = base_url
+        base_url = self.model_config.base_url
 
-        # Extended Thinking 配置（直接传递，避免 model_kwargs 警告）
-        if self.enable_thinking:
+        # 添加认证参数（支持第三方代理）
+        if self.model_config.api_key:
+            init_kwargs["api_key"] = self.model_config.api_key
+
+        # Provider-specific thinking / reasoning 配置
+        if self.model_provider == "anthropic" and self.enable_thinking:
             init_kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": self.thinking_budget,
             }
+        elif self.model_provider == "openai" and self.enable_thinking:
+            use_responses_api = _parse_bool_env("OPENAI_USE_RESPONSES_API", True)
+            reasoning_effort = (
+                os.getenv("OPENAI_REASONING_EFFORT")
+                or os.getenv("MODEL_REASONING_EFFORT")
+                or DEFAULT_OPENAI_REASONING_EFFORT
+            )
+            init_kwargs["use_responses_api"] = use_responses_api
+            if use_responses_api:
+                init_kwargs["reasoning"] = {
+                    "effort": reasoning_effort,
+                    "summary": os.getenv("OPENAI_REASONING_SUMMARY", "auto"),
+                }
+                base_url = _normalize_openai_base_url(base_url, use_responses_api=True)
+            else:
+                init_kwargs["reasoning_effort"] = reasoning_effort
+
+        if base_url:
+            init_kwargs["base_url"] = base_url
 
         # 初始化模型
         model = init_chat_model(
@@ -296,6 +492,8 @@ When a user request matches a skill's description, use the load_skill tool to ge
         tracker = ToolCallTracker()
 
         full_response = ""
+        reasoning_tokens = 0
+        thinking_seen = False
         debug = os.getenv("SKILLS_DEBUG", "").lower() in ("1", "true", "yes")
 
         # 使用 messages 模式获取 token 级流式
@@ -318,8 +516,11 @@ When a user request matches a skill's description, use the load_skill tool to ge
 
                 # 处理 AIMessageChunk / AIMessage
                 if isinstance(chunk, (AIMessageChunk, AIMessage)):
+                    reasoning_tokens += self._extract_reasoning_tokens(chunk)
                     # 处理 content
                     for ev in self._process_chunk_content(chunk, emitter, tracker):
+                        if ev.type == "thinking":
+                            thinking_seen = True
                         if ev.type == "text":
                             full_response += ev.data.get("content", "")
                         if debug:
@@ -354,6 +555,12 @@ When a user request matches a skill's description, use the load_skill tool to ge
             # 发送错误事件让用户知道发生了什么
             yield emitter.error(str(e)).data
             raise
+
+        if self.model_provider == "openai" and self.enable_thinking and reasoning_tokens > 0 and not thinking_seen:
+            yield emitter.thinking(
+                f"[OpenAI reasoning enabled: used {reasoning_tokens} reasoning tokens. "
+                "This endpoint does not expose reasoning summary text in the stream.]"
+            ).data
 
         # 发送完成事件
         yield emitter.done(full_response).data
@@ -488,6 +695,13 @@ When a user request matches a skill's description, use the load_skill tool to ge
 
         yield emitter.tool_result(name, content, success)
 
+    def _extract_reasoning_tokens(self, chunk) -> int:
+        """从 OpenAI chunk 的 usage_metadata 中提取 reasoning token 数量"""
+        usage_metadata = getattr(chunk, "usage_metadata", None) or {}
+        output_details = usage_metadata.get("output_token_details") or {}
+        reasoning_tokens = output_details.get("reasoning", 0)
+        return reasoning_tokens if isinstance(reasoning_tokens, int) else 0
+
     def get_last_response(self, result: dict) -> str:
         """
         从结果中提取最后的 AI 响应文本
@@ -517,6 +731,7 @@ When a user request matches a skill's description, use the load_skill tool to ge
 
 def create_skills_agent(
     model: Optional[str] = None,
+    model_provider: Optional[str] = None,
     skill_paths: Optional[list[Path]] = None,
     working_directory: Optional[Path] = None,
     enable_thinking: bool = True,
@@ -527,6 +742,7 @@ def create_skills_agent(
 
     Args:
         model: 模型名称
+        model_provider: 模型提供商
         skill_paths: Skills 搜索路径
         working_directory: 工作目录
         enable_thinking: 是否启用 Extended Thinking
@@ -537,6 +753,7 @@ def create_skills_agent(
     """
     return LangChainSkillsAgent(
         model=model,
+        model_provider=model_provider,
         skill_paths=skill_paths,
         working_directory=working_directory,
         enable_thinking=enable_thinking,

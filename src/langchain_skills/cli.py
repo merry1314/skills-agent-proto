@@ -545,10 +545,13 @@ def cmd_run(prompt: str, enable_thinking: bool = True):
     console.print(Panel(f"[bold cyan]User Request:[/bold cyan]\n{prompt}"))
     console.print()
 
-    # 检查 API 认证（支持 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN）
+    # 检查 API 认证（支持 MODEL_* / Anthropic / OpenAI 配置）
     if not check_api_credentials():
         console.print("[red]Error: API credentials not set[/red]")
-        console.print("Please set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in .env file")
+        console.print(
+            "Please set MODEL_API_KEY or provider-specific credentials "
+            "(ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY) in .env file"
+        )
         sys.exit(1)
 
     agent = LangChainSkillsAgent(enable_thinking=enable_thinking)
@@ -597,10 +600,13 @@ def cmd_interactive(enable_thinking: bool = True):
     """
     print_banner()
 
-    # 检查 API 认证（支持 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN）
+    # 检查 API 认证（支持 MODEL_* / Anthropic / OpenAI 配置）
     if not check_api_credentials():
         console.print("[red]Error: API credentials not set[/red]")
-        console.print("Please set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in .env file")
+        console.print(
+            "Please set MODEL_API_KEY or provider-specific credentials "
+            "(ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY) in .env file"
+        )
         sys.exit(1)
 
     agent = LangChainSkillsAgent(enable_thinking=enable_thinking)
@@ -612,7 +618,8 @@ def cmd_interactive(enable_thinking: bool = True):
         console.print(f"  - {skill['name']}")
     console.print()
 
-    thinking_status = "[green]enabled[/green]" if enable_thinking else "[dim]disabled[/dim]"
+    thinking_status = "[green]enabled[/green]" if agent.enable_thinking else "[dim]disabled[/dim]"
+    console.print(f"[dim]Model: {agent.model_provider}:{agent.model_name}[/dim]")
     console.print(f"[dim]Extended Thinking: {thinking_status}[/dim]")
     console.print("[dim]Commands: /exit to quit, /skills to list skills, /prompt to show system prompt[/dim]\n")
 
